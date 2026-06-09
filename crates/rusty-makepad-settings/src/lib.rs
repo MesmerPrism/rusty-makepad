@@ -186,7 +186,8 @@ pub enum SettingLayer {
 }
 
 impl SettingLayer {
-    fn as_str(self) -> &'static str {
+    /// Stable layer label.
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::SchemaDefault => "schema_default",
             Self::AppDefault => "app_default",
@@ -195,6 +196,19 @@ impl SettingLayer {
             Self::LaunchOverride => "launch_override",
             Self::EnvironmentOverride => "environment_override",
             Self::HotloadOverride => "hotload_override",
+        }
+    }
+
+    /// Default precedence for deterministic resolution.
+    pub fn precedence(self) -> u32 {
+        match self {
+            Self::SchemaDefault => 0,
+            Self::AppDefault => 10,
+            Self::PlatformProfile => 20,
+            Self::RuntimeProfile => 30,
+            Self::LaunchOverride => 40,
+            Self::EnvironmentOverride => 50,
+            Self::HotloadOverride => 60,
         }
     }
 }
@@ -206,6 +220,17 @@ pub struct ProfileValue {
     pub setting_id: String,
     /// Proposed value.
     pub value: Value,
+}
+
+/// One layer of proposed values over a settings surface.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SettingsLayerValues {
+    /// Resolution layer.
+    pub layer: SettingLayer,
+    /// Source id for provenance.
+    pub source_id: String,
+    /// Values proposed by this layer.
+    pub values: Vec<ProfileValue>,
 }
 
 /// Effective settings report after deterministic resolution.
@@ -259,6 +284,14 @@ pub struct RejectedSettingLayer {
     pub value: Value,
     /// Rejection reason.
     pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SettingCandidate {
+    value: Value,
+    layer: SettingLayer,
+    source_id: String,
+    layer_order: usize,
 }
 
 /// Validation failure.
@@ -408,41 +441,119 @@ pub fn resolve_profile(
     generated_at: impl Into<String>,
 ) -> Result<EffectiveSettingsReport, Vec<ValidationError>> {
     validate_profile(surface, profile)?;
+    resolve_layers(
+        surface,
+        [SettingsLayerValues {
+            layer: profile.layer,
+            source_id: profile.profile_id.clone(),
+            values: profile.values.clone(),
+        }],
+        revision,
+        generated_at,
+    )
+}
 
-    let mut profile_values: BTreeMap<&str, &ProfileValue> = BTreeMap::new();
-    for value in &profile.values {
-        profile_values.insert(value.setting_id.as_str(), value);
+/// Resolve multiple deterministic layers over a settings surface.
+pub fn resolve_layers(
+    surface: &AppSettingsSurface,
+    layers: impl IntoIterator<Item = SettingsLayerValues>,
+    revision: u64,
+    generated_at: impl Into<String>,
+) -> Result<EffectiveSettingsReport, Vec<ValidationError>> {
+    let mut errors = Vec::new();
+    if let Err(surface_errors) = validate_surface(surface) {
+        errors.extend(surface_errors);
+    }
+
+    let settings_by_id: BTreeMap<&str, &SettingDefinition> = surface
+        .settings
+        .iter()
+        .map(|setting| (setting.id.as_str(), setting))
+        .collect();
+    let mut candidates: BTreeMap<&str, Vec<SettingCandidate>> = BTreeMap::new();
+    for setting in &surface.settings {
+        candidates
+            .entry(setting.id.as_str())
+            .or_default()
+            .push(SettingCandidate {
+                value: setting.default_value.clone(),
+                layer: SettingLayer::SchemaDefault,
+                source_id: format!("{}.default", surface.app_id),
+                layer_order: 0,
+            });
+    }
+
+    for (index, layer) in layers.into_iter().enumerate() {
+        if layer.source_id.trim().is_empty() {
+            errors.push(ValidationError::new(format!(
+                "{} layer must declare source_id",
+                layer.layer.as_str()
+            )));
+        }
+        let mut seen_values = BTreeSet::new();
+        for proposed in layer.values {
+            if !seen_values.insert(proposed.setting_id.clone()) {
+                errors.push(ValidationError::new(format!(
+                    "layer {} repeats setting {}",
+                    layer.source_id, proposed.setting_id
+                )));
+                continue;
+            }
+            let Some(setting) = settings_by_id.get(proposed.setting_id.as_str()) else {
+                errors.push(ValidationError::new(format!(
+                    "layer {} references unknown setting {}",
+                    layer.source_id, proposed.setting_id
+                )));
+                continue;
+            };
+            validate_value(setting, &proposed.value, "layer value", &mut errors);
+            candidates
+                .entry(setting.id.as_str())
+                .or_default()
+                .push(SettingCandidate {
+                    value: proposed.value,
+                    layer: layer.layer,
+                    source_id: layer.source_id.clone(),
+                    layer_order: index + 1,
+                });
+        }
+    }
+
+    if !errors.is_empty() {
+        return Err(errors);
     }
 
     let mut settings = Vec::with_capacity(surface.settings.len());
     for setting in &surface.settings {
-        let default_layer = RejectedSettingLayer {
-            layer: SettingLayer::SchemaDefault.as_str().to_string(),
-            source_id: format!("{}.default", surface.app_id),
-            value: setting.default_value.clone(),
-            reason: format!("overridden_by_{}", profile.layer.as_str()),
-        };
-        let (value, winning_layer, winning_source_id, rejected_layers) =
-            if let Some(profile_value) = profile_values.get(setting.id.as_str()) {
-                (
-                    profile_value.value.clone(),
-                    profile.layer.as_str().to_string(),
-                    profile.profile_id.clone(),
-                    vec![default_layer],
-                )
-            } else {
-                (
-                    setting.default_value.clone(),
-                    SettingLayer::SchemaDefault.as_str().to_string(),
-                    format!("{}.default", surface.app_id),
-                    Vec::new(),
-                )
-            };
+        let mut setting_candidates = candidates
+            .remove(setting.id.as_str())
+            .expect("defaults should create candidates for every setting");
+        setting_candidates.sort_by(|left, right| {
+            right
+                .layer
+                .precedence()
+                .cmp(&left.layer.precedence())
+                .then_with(|| right.layer_order.cmp(&left.layer_order))
+        });
+        let winner = setting_candidates
+            .first()
+            .expect("setting must have at least the default candidate")
+            .clone();
+        let rejected_layers = setting_candidates
+            .iter()
+            .skip(1)
+            .map(|candidate| RejectedSettingLayer {
+                layer: candidate.layer.as_str().to_string(),
+                source_id: candidate.source_id.clone(),
+                value: candidate.value.clone(),
+                reason: format!("overridden_by_{}", winner.layer.as_str()),
+            })
+            .collect();
         settings.push(EffectiveSetting {
             setting_id: setting.id.clone(),
-            value,
-            winning_layer,
-            winning_source_id,
+            value: winner.value,
+            winning_layer: winner.layer.as_str().to_string(),
+            winning_source_id: winner.source_id,
             rejected_layers,
             hotload_policy: setting.hotload_policy,
             writer_policy: setting.writer_policy,
@@ -459,6 +570,77 @@ pub fn resolve_profile(
         generated_at: generated_at.into(),
         settings,
     })
+}
+
+/// Build log marker lines for an effective settings report.
+pub fn effective_settings_marker_lines(
+    marker: &str,
+    backend: &str,
+    phase: &str,
+    report: &EffectiveSettingsReport,
+) -> Vec<String> {
+    const FIELDS_PER_LINE: usize = 4;
+    let marker = sanitize_marker_token(marker);
+    let backend = sanitize_marker_token(backend);
+    let phase = sanitize_marker_token(phase);
+    let fields = report
+        .settings
+        .iter()
+        .map(effective_setting_marker_token)
+        .collect::<Vec<_>>();
+    let part_count = fields.len().div_ceil(FIELDS_PER_LINE).max(1);
+    if fields.is_empty() {
+        return vec![format!(
+            "{} schema={} app={} phase={} backend={} revision={} part=1/1 fieldCount=0 fields=none",
+            marker,
+            EFFECTIVE_SETTINGS_SCHEMA,
+            sanitize_marker_token(&report.app_id),
+            phase,
+            backend,
+            report.revision
+        )];
+    }
+    fields
+        .chunks(FIELDS_PER_LINE)
+        .enumerate()
+        .map(|(index, chunk)| {
+            format!(
+                "{} schema={} app={} phase={} backend={} revision={} part={}/{} fieldCount={} fields={}",
+                marker,
+                EFFECTIVE_SETTINGS_SCHEMA,
+                sanitize_marker_token(&report.app_id),
+                phase,
+                backend,
+                report.revision,
+                index + 1,
+                part_count,
+                fields.len(),
+                chunk.join(";")
+            )
+        })
+        .collect()
+}
+
+fn effective_setting_marker_token(setting: &EffectiveSetting) -> String {
+    format!(
+        "{}[value={},layer={},source={},rejected={},hotload={:?}]",
+        sanitize_marker_token(&setting.setting_id),
+        sanitize_marker_token(&setting.value.to_string()),
+        sanitize_marker_token(&setting.winning_layer),
+        sanitize_marker_token(&setting.winning_source_id),
+        setting.rejected_layers.len(),
+        setting.hotload_policy
+    )
+}
+
+fn sanitize_marker_token(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-' | '.' | ':' => ch,
+            _ => '_',
+        })
+        .collect()
 }
 
 fn validate_value(
@@ -553,9 +735,11 @@ fn value_error(
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_profile, validate_profile, validate_surface, AppSettingsSurface, SettingsProfile,
-        EFFECTIVE_SETTINGS_SCHEMA,
+        effective_settings_marker_lines, resolve_layers, resolve_profile, validate_profile,
+        validate_surface, AppSettingsSurface, ProfileValue, SettingLayer, SettingsLayerValues,
+        SettingsProfile, EFFECTIVE_SETTINGS_SCHEMA,
     };
+    use serde_json::json;
 
     fn surface() -> AppSettingsSurface {
         serde_json::from_str(include_str!(
@@ -591,6 +775,59 @@ mod tests {
             .expect("speed setting");
         assert_eq!(speed.winning_layer, "runtime_profile");
         assert_eq!(speed.rejected_layers.len(), 1);
+    }
+
+    #[test]
+    fn higher_layers_win_and_rejected_layers_are_recorded() {
+        let surface = surface();
+        let report = resolve_layers(
+            &surface,
+            [
+                SettingsLayerValues {
+                    layer: SettingLayer::RuntimeProfile,
+                    source_id: "profile.mesh".to_string(),
+                    values: vec![ProfileValue {
+                        setting_id: "makepad.mesh_replay.speed".to_string(),
+                        value: json!(2.0),
+                    }],
+                },
+                SettingsLayerValues {
+                    layer: SettingLayer::HotloadOverride,
+                    source_id: "hotload.session.7".to_string(),
+                    values: vec![ProfileValue {
+                        setting_id: "makepad.mesh_replay.speed".to_string(),
+                        value: json!(3.0),
+                    }],
+                },
+            ],
+            8,
+            "2026-06-09T00:00:00Z",
+        )
+        .expect("resolve layers");
+        let speed = report
+            .settings
+            .iter()
+            .find(|setting| setting.setting_id == "makepad.mesh_replay.speed")
+            .expect("speed setting");
+        assert_eq!(speed.value, json!(3.0));
+        assert_eq!(speed.winning_layer, "hotload_override");
+        assert_eq!(speed.rejected_layers.len(), 2);
+    }
+
+    #[test]
+    fn marker_lines_include_effective_settings_trace() {
+        let report = resolve_profile(&surface(), &profile(), 9, "2026-06-09T00:00:00Z")
+            .expect("resolve profile");
+        let lines = effective_settings_marker_lines(
+            "RUSTY_MAKEPAD_EFFECTIVE_SETTINGS",
+            "test",
+            "startup",
+            &report,
+        );
+        let joined = lines.join("\n");
+        assert!(joined.contains("schema=rusty.gui.makepad.effective_settings.v1"));
+        assert!(joined.contains("makepad.mesh_replay.speed"));
+        assert!(joined.contains("layer=runtime_profile"));
     }
 
     #[test]

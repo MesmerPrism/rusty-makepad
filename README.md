@@ -20,3 +20,4 @@ Quest-specific profile bundles and headset app behavior belong in
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\check_all.ps1
 ```
 
+See `docs/PROVENANCE.md` for the runtime-settings extraction boundary.
