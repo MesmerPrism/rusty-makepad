@@ -1,0 +1,34 @@
+{
+  "schema": "rusty.gui.makepad.app_settings_surface.v1",
+  "app_id": "rusty-makepad.damaged",
+  "version": 1,
+  "settings": [
+    {
+      "id": "makepad.mesh_replay.enabled",
+      "owner_repo": "rusty-makepad",
+      "owner_module": "settings.mesh_replay",
+      "value_type": "boolean",
+      "default": false,
+      "hotload_policy": "frame_safe",
+      "writer_policy": "profile_owned",
+      "sensitivity": "public_safe",
+      "exposures": [
+        { "kind": "cli_flag", "name": "mesh-replay-enabled" }
+      ]
+    },
+    {
+      "id": "makepad.mesh_replay.enabled",
+      "owner_repo": "rusty-makepad",
+      "owner_module": "settings.mesh_replay",
+      "value_type": "boolean",
+      "default": true,
+      "hotload_policy": "frame_safe",
+      "writer_policy": "profile_owned",
+      "sensitivity": "public_safe",
+      "exposures": [
+        { "kind": "cli_flag", "name": "mesh-replay-enabled-alt" }
+      ]
+    }
+  ]
+}
+

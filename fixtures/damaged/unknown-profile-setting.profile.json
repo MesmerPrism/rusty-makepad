@@ -1,0 +1,13 @@
+{
+  "schema": "rusty.gui.makepad.settings_profile.v1",
+  "profile_id": "profile.makepad.damaged.unknown",
+  "surface_app_id": "rusty-makepad.example",
+  "layer": "runtime_profile",
+  "values": [
+    {
+      "setting_id": "makepad.unknown.enabled",
+      "value": true
+    }
+  ]
+}
+

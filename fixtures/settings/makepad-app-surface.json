@@ -1,0 +1,116 @@
+{
+  "schema": "rusty.gui.makepad.app_settings_surface.v1",
+  "app_id": "rusty-makepad.example",
+  "version": 1,
+  "settings": [
+    {
+      "id": "makepad.mesh_replay.enabled",
+      "owner_repo": "rusty-makepad",
+      "owner_module": "settings.mesh_replay",
+      "value_type": "boolean",
+      "default": false,
+      "hotload_policy": "frame_safe",
+      "writer_policy": "profile_owned",
+      "sensitivity": "public_safe",
+      "exposures": [
+        { "kind": "cli_flag", "name": "mesh-replay-enabled" },
+        { "kind": "environment_variable", "name": "RUSTY_MAKEPAD_MESH_REPLAY_ENABLED" },
+        { "kind": "android_property", "name": "debug.rustymakepad.mesh.replay.enabled" },
+        { "kind": "ui_control", "name": "control.mesh_replay.enabled" }
+      ],
+      "readback_field": "meshReplayEnabled"
+    },
+    {
+      "id": "makepad.mesh_replay.speed",
+      "owner_repo": "rusty-makepad",
+      "owner_module": "settings.mesh_replay",
+      "value_type": "number",
+      "unit": "x",
+      "minimum": 0.1,
+      "maximum": 8.0,
+      "default": 1.0,
+      "hotload_policy": "frame_safe",
+      "writer_policy": "session_hotload",
+      "sensitivity": "public_safe",
+      "exposures": [
+        { "kind": "cli_flag", "name": "mesh-replay-speed" },
+        { "kind": "environment_variable", "name": "RUSTY_MAKEPAD_MESH_REPLAY_SPEED" },
+        { "kind": "android_property", "name": "debug.rustymakepad.mesh.replay.speed" },
+        { "kind": "ui_control", "name": "control.mesh_replay.speed" }
+      ],
+      "readback_field": "meshReplaySpeed"
+    },
+    {
+      "id": "makepad.projection.depth_meters",
+      "owner_repo": "rusty-makepad",
+      "owner_module": "settings.projection",
+      "value_type": "number",
+      "unit": "m",
+      "minimum": 0.1,
+      "maximum": 10.0,
+      "default": 1.434085,
+      "hotload_policy": "scene_rebuild",
+      "writer_policy": "profile_owned",
+      "sensitivity": "public_safe",
+      "exposures": [
+        { "kind": "cli_flag", "name": "projection-depth-meters" },
+        { "kind": "environment_variable", "name": "RUSTY_MAKEPAD_PROJECTION_DEPTH_METERS" },
+        { "kind": "android_property", "name": "debug.rustymakepad.projection.depth_meters" }
+      ],
+      "readback_field": "projectionDepthMeters"
+    },
+    {
+      "id": "makepad.render.scale",
+      "owner_repo": "rusty-makepad",
+      "owner_module": "settings.render",
+      "value_type": "number",
+      "unit": "x",
+      "minimum": 0.5,
+      "maximum": 1.5,
+      "default": 1.0,
+      "hotload_policy": "scene_rebuild",
+      "writer_policy": "profile_owned",
+      "sensitivity": "public_safe",
+      "exposures": [
+        { "kind": "cli_flag", "name": "render-scale" },
+        { "kind": "environment_variable", "name": "RUSTY_MAKEPAD_RENDER_SCALE" },
+        { "kind": "android_property", "name": "debug.rustymakepad.render.scale" }
+      ],
+      "readback_field": "renderScale"
+    },
+    {
+      "id": "makepad.collision.enabled",
+      "owner_repo": "rusty-makepad",
+      "owner_module": "settings.collision",
+      "value_type": "boolean",
+      "default": false,
+      "hotload_policy": "frame_safe",
+      "writer_policy": "profile_owned",
+      "sensitivity": "public_safe",
+      "exposures": [
+        { "kind": "cli_flag", "name": "collision-enabled" },
+        { "kind": "environment_variable", "name": "RUSTY_MAKEPAD_COLLISION_ENABLED" },
+        { "kind": "android_property", "name": "debug.rustymakepad.collision.enabled" }
+      ],
+      "readback_field": "collisionEnabled"
+    },
+    {
+      "id": "makepad.sdf_adf.overlay_mode",
+      "owner_repo": "rusty-makepad",
+      "owner_module": "settings.sdf_adf",
+      "value_type": "enum",
+      "enum_values": ["off", "sdf", "adf", "combined"],
+      "default": "off",
+      "hotload_policy": "scene_rebuild",
+      "writer_policy": "profile_owned",
+      "sensitivity": "public_safe",
+      "exposures": [
+        { "kind": "cli_flag", "name": "sdf-adf-overlay-mode" },
+        { "kind": "environment_variable", "name": "RUSTY_MAKEPAD_SDF_ADF_OVERLAY_MODE" },
+        { "kind": "android_property", "name": "debug.rustymakepad.sdf_adf.overlay_mode" }
+      ],
+      "readback_field": "sdfAdfOverlayMode"
+    }
+  ]
+}
+
