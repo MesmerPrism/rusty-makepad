@@ -11,6 +11,13 @@ pub const SETTINGS_SURFACE_SCHEMA: &str = "rusty.gui.makepad.app_settings_surfac
 pub const SETTINGS_PROFILE_SCHEMA: &str = "rusty.gui.makepad.settings_profile.v1";
 /// Schema id for effective settings reports.
 pub const EFFECTIVE_SETTINGS_SCHEMA: &str = "rusty.gui.makepad.effective_settings.v1";
+/// Schema id for hotload proposals.
+pub const HOTLOAD_PROPOSAL_SCHEMA: &str = "rusty.gui.makepad.hotload_proposal.v1";
+/// Schema id for hotload decisions.
+pub const HOTLOAD_DECISION_SCHEMA: &str = "rusty.gui.makepad.hotload_decision.v1";
+/// Schema id for hotload application results.
+pub const HOTLOAD_APPLICATION_RESULT_SCHEMA: &str =
+    "rusty.gui.makepad.hotload_application_result.v1";
 
 /// Canonical settings surface for one Makepad app.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -231,6 +238,103 @@ pub struct SettingsLayerValues {
     pub source_id: String,
     /// Values proposed by this layer.
     pub values: Vec<ProfileValue>,
+}
+
+/// Hotload proposal over canonical setting ids.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HotloadProposal {
+    /// Schema id.
+    pub schema: String,
+    /// Stable proposal id.
+    pub proposal_id: String,
+    /// Target app id.
+    pub app_id: String,
+    /// Entry point or session id that proposed the change.
+    pub source_id: String,
+    /// Effective-settings revision the proposal was based on.
+    pub requested_revision: u64,
+    /// Proposed setting values.
+    pub values: Vec<ProfileValue>,
+}
+
+/// Hotload proposal application result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HotloadApplicationResult {
+    /// Schema id.
+    pub schema: String,
+    /// Decision evidence.
+    pub decision: HotloadDecision,
+    /// Effective settings after accepted hotload values were applied.
+    pub report: EffectiveSettingsReport,
+}
+
+/// Accepted/rejected hotload decision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HotloadDecision {
+    /// Schema id.
+    pub schema: String,
+    /// Stable proposal id.
+    pub proposal_id: String,
+    /// Target app id.
+    pub app_id: String,
+    /// Entry point or session id that proposed the change.
+    pub source_id: String,
+    /// Effective-settings revision the proposal was based on.
+    pub requested_revision: u64,
+    /// Effective-settings revision produced by this decision.
+    pub accepted_revision: u64,
+    /// Decision timestamp or stable fixture timestamp.
+    pub generated_at: String,
+    /// Overall decision status.
+    pub status: HotloadDecisionStatus,
+    /// Accepted values.
+    pub accepted_values: Vec<AcceptedHotloadValue>,
+    /// Rejected values.
+    pub rejected_values: Vec<RejectedHotloadValue>,
+}
+
+/// Hotload decision status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HotloadDecisionStatus {
+    /// Every proposed value was accepted.
+    Accepted,
+    /// Some values were accepted and some were rejected.
+    PartiallyAccepted,
+    /// No proposed values were accepted.
+    Rejected,
+}
+
+/// Runtime action required for an accepted hotload value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HotloadRequiredAction {
+    /// Apply during the current or next frame.
+    ApplyThisFrame,
+    /// Rebuild scene resources before the value takes effect.
+    RebuildScene,
+}
+
+/// Accepted hotload value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AcceptedHotloadValue {
+    /// Canonical setting id.
+    pub setting_id: String,
+    /// Accepted value.
+    pub value: Value,
+    /// Action required before the value takes effect.
+    pub required_action: HotloadRequiredAction,
+}
+
+/// Rejected hotload value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RejectedHotloadValue {
+    /// Canonical setting id.
+    pub setting_id: String,
+    /// Rejected value.
+    pub value: Value,
+    /// Rejection reason.
+    pub reason: String,
 }
 
 /// Effective settings report after deterministic resolution.
@@ -572,6 +676,120 @@ pub fn resolve_layers(
     })
 }
 
+/// Apply a hotload proposal over existing setting layers.
+pub fn apply_hotload_proposal(
+    surface: &AppSettingsSurface,
+    base_layers: impl IntoIterator<Item = SettingsLayerValues>,
+    proposal: &HotloadProposal,
+    accepted_revision: u64,
+    generated_at: impl Into<String>,
+) -> Result<HotloadApplicationResult, Vec<ValidationError>> {
+    let generated_at = generated_at.into();
+    validate_hotload_proposal_header(surface, proposal)?;
+
+    let settings_by_id: BTreeMap<&str, &SettingDefinition> = surface
+        .settings
+        .iter()
+        .map(|setting| (setting.id.as_str(), setting))
+        .collect();
+
+    let mut accepted_values = Vec::new();
+    let mut accepted_profile_values = Vec::new();
+    let mut rejected_values = Vec::new();
+    let mut seen_values = BTreeSet::new();
+
+    for proposed in &proposal.values {
+        if !seen_values.insert(proposed.setting_id.clone()) {
+            rejected_values.push(RejectedHotloadValue {
+                setting_id: proposed.setting_id.clone(),
+                value: proposed.value.clone(),
+                reason: "duplicate_setting_in_proposal".to_string(),
+            });
+            continue;
+        }
+
+        let Some(setting) = settings_by_id.get(proposed.setting_id.as_str()) else {
+            rejected_values.push(RejectedHotloadValue {
+                setting_id: proposed.setting_id.clone(),
+                value: proposed.value.clone(),
+                reason: "unknown_setting".to_string(),
+            });
+            continue;
+        };
+
+        if let Some(reason) = hotload_rejection_reason(setting) {
+            rejected_values.push(RejectedHotloadValue {
+                setting_id: proposed.setting_id.clone(),
+                value: proposed.value.clone(),
+                reason,
+            });
+            continue;
+        }
+
+        let value_errors = validation_errors_for_value(setting, &proposed.value, "hotload value");
+        if !value_errors.is_empty() {
+            rejected_values.push(RejectedHotloadValue {
+                setting_id: proposed.setting_id.clone(),
+                value: proposed.value.clone(),
+                reason: value_errors
+                    .into_iter()
+                    .map(|error| sanitize_rejection_reason(&error.message))
+                    .collect::<Vec<_>>()
+                    .join(";"),
+            });
+            continue;
+        }
+
+        let required_action = match setting.hotload_policy {
+            HotloadPolicy::FrameSafe => HotloadRequiredAction::ApplyThisFrame,
+            HotloadPolicy::SceneRebuild => HotloadRequiredAction::RebuildScene,
+            HotloadPolicy::StartupOnly | HotloadPolicy::RestartRequired => {
+                unreachable!("hotload policy rejection should run before action selection")
+            }
+        };
+        accepted_values.push(AcceptedHotloadValue {
+            setting_id: proposed.setting_id.clone(),
+            value: proposed.value.clone(),
+            required_action,
+        });
+        accepted_profile_values.push(proposed.clone());
+    }
+
+    let mut layers: Vec<SettingsLayerValues> = base_layers.into_iter().collect();
+    if !accepted_profile_values.is_empty() {
+        layers.push(SettingsLayerValues {
+            layer: SettingLayer::HotloadOverride,
+            source_id: proposal.source_id.clone(),
+            values: accepted_profile_values,
+        });
+    }
+
+    let report = resolve_layers(surface, layers, accepted_revision, generated_at.clone())?;
+    let status = match (accepted_values.is_empty(), rejected_values.is_empty()) {
+        (false, true) => HotloadDecisionStatus::Accepted,
+        (false, false) => HotloadDecisionStatus::PartiallyAccepted,
+        (true, _) => HotloadDecisionStatus::Rejected,
+    };
+    let decision = HotloadDecision {
+        schema: HOTLOAD_DECISION_SCHEMA.to_string(),
+        proposal_id: proposal.proposal_id.clone(),
+        app_id: proposal.app_id.clone(),
+        source_id: proposal.source_id.clone(),
+        requested_revision: proposal.requested_revision,
+        accepted_revision,
+        generated_at,
+        status,
+        accepted_values,
+        rejected_values,
+    };
+
+    Ok(HotloadApplicationResult {
+        schema: HOTLOAD_APPLICATION_RESULT_SCHEMA.to_string(),
+        decision,
+        report,
+    })
+}
+
 /// Build log marker lines for an effective settings report.
 pub fn effective_settings_marker_lines(
     marker: &str,
@@ -732,11 +950,97 @@ fn value_error(
     ))
 }
 
+fn validate_hotload_proposal_header(
+    surface: &AppSettingsSurface,
+    proposal: &HotloadProposal,
+) -> Result<(), Vec<ValidationError>> {
+    let mut errors = Vec::new();
+    if let Err(surface_errors) = validate_surface(surface) {
+        errors.extend(surface_errors);
+    }
+    if proposal.schema != HOTLOAD_PROPOSAL_SCHEMA {
+        errors.push(ValidationError::new(format!(
+            "unsupported hotload proposal schema {}",
+            proposal.schema
+        )));
+    }
+    if proposal.proposal_id.trim().is_empty() {
+        errors.push(ValidationError::new("proposal_id must not be empty"));
+    }
+    if proposal.app_id != surface.app_id {
+        errors.push(ValidationError::new(format!(
+            "hotload proposal {} targets {}, expected {}",
+            proposal.proposal_id, proposal.app_id, surface.app_id
+        )));
+    }
+    if proposal.source_id.trim().is_empty() {
+        errors.push(ValidationError::new("source_id must not be empty"));
+    }
+    if proposal.values.is_empty() {
+        errors.push(ValidationError::new(
+            "hotload proposal must contain at least one value",
+        ));
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn hotload_rejection_reason(setting: &SettingDefinition) -> Option<String> {
+    if !matches!(
+        setting.writer_policy,
+        WriterPolicy::SessionHotload | WriterPolicy::UiProposed
+    ) {
+        return Some(format!(
+            "writer_policy_{}_does_not_accept_hotload",
+            writer_policy_id(setting.writer_policy)
+        ));
+    }
+    match setting.hotload_policy {
+        HotloadPolicy::FrameSafe | HotloadPolicy::SceneRebuild => None,
+        HotloadPolicy::StartupOnly => Some("hotload_policy_startup_only".to_string()),
+        HotloadPolicy::RestartRequired => Some("hotload_policy_restart_required".to_string()),
+    }
+}
+
+fn writer_policy_id(policy: WriterPolicy) -> &'static str {
+    match policy {
+        WriterPolicy::ReadOnly => "read_only",
+        WriterPolicy::ProfileOwned => "profile_owned",
+        WriterPolicy::SessionHotload => "session_hotload",
+        WriterPolicy::UiProposed => "ui_proposed",
+    }
+}
+
+fn validation_errors_for_value(
+    setting: &SettingDefinition,
+    value: &Value,
+    label: &str,
+) -> Vec<ValidationError> {
+    let mut errors = Vec::new();
+    validate_value(setting, value, label, &mut errors);
+    errors
+}
+
+fn sanitize_rejection_reason(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-' | '.' | ':' => ch,
+            _ => '_',
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        effective_settings_marker_lines, resolve_layers, resolve_profile, validate_profile,
-        validate_surface, AppSettingsSurface, ProfileValue, SettingLayer, SettingsLayerValues,
+        apply_hotload_proposal, effective_settings_marker_lines, resolve_layers, resolve_profile,
+        validate_profile, validate_surface, AppSettingsSurface, HotloadDecisionStatus,
+        HotloadProposal, HotloadRequiredAction, ProfileValue, SettingLayer, SettingsLayerValues,
         SettingsProfile, EFFECTIVE_SETTINGS_SCHEMA,
     };
     use serde_json::json;
@@ -753,6 +1057,13 @@ mod tests {
             "../../../fixtures/profiles/mesh-replay-fast.profile.json"
         ))
         .expect("valid profile JSON")
+    }
+
+    fn hotload_proposal() -> HotloadProposal {
+        serde_json::from_str(include_str!(
+            "../../../fixtures/hotload/mesh-replay-hotload.proposal.json"
+        ))
+        .expect("valid hotload proposal JSON")
     }
 
     #[test]
@@ -828,6 +1139,53 @@ mod tests {
         assert!(joined.contains("schema=rusty.gui.makepad.effective_settings.v1"));
         assert!(joined.contains("makepad.mesh_replay.speed"));
         assert!(joined.contains("layer=runtime_profile"));
+    }
+
+    #[test]
+    fn hotload_proposal_accepts_only_policy_allowed_values() {
+        let surface = surface();
+        let profile = profile();
+        let result = apply_hotload_proposal(
+            &surface,
+            [SettingsLayerValues {
+                layer: profile.layer,
+                source_id: profile.profile_id,
+                values: profile.values,
+            }],
+            &hotload_proposal(),
+            10,
+            "2026-06-09T00:00:00Z",
+        )
+        .expect("hotload proposal should apply");
+
+        assert_eq!(
+            result.decision.status,
+            HotloadDecisionStatus::PartiallyAccepted
+        );
+        assert_eq!(result.decision.accepted_values.len(), 1);
+        assert_eq!(
+            result.decision.accepted_values[0].required_action,
+            HotloadRequiredAction::ApplyThisFrame
+        );
+        assert!(result
+            .decision
+            .rejected_values
+            .iter()
+            .any(|value| value.reason.contains("writer_policy_profile_owned")));
+        assert!(result
+            .decision
+            .rejected_values
+            .iter()
+            .any(|value| value.reason == "unknown_setting"));
+
+        let speed = result
+            .report
+            .settings
+            .iter()
+            .find(|setting| setting.setting_id == "makepad.mesh_replay.speed")
+            .expect("speed setting");
+        assert_eq!(speed.value, json!(3.5));
+        assert_eq!(speed.winning_layer, "hotload_override");
     }
 
     #[test]

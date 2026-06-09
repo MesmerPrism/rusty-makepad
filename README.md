@@ -9,6 +9,13 @@ The first source slice provides:
 - `rusty.gui.makepad.settings_profile.v1`
 - `rusty.gui.makepad.effective_settings.v1`
 - a resolver that produces deterministic effective settings with provenance.
+- `rusty.gui.makepad.hotload_proposal.v1`
+- `rusty.gui.makepad.hotload_decision.v1`
+
+Hotload changes are proposal-driven: a session submits canonical setting ids,
+the resolver accepts only values allowed by writer and hotload policies, and the
+result records accepted values, rejected values, required runtime action, and
+the resulting effective-settings revision.
 
 Quest-specific profile bundles and headset app behavior belong in
 `rusty-quest-makepad`; platform write/readback transports belong in

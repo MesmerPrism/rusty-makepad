@@ -3,7 +3,8 @@
 use std::{env, fs, path::PathBuf, time::SystemTime};
 
 use rusty_makepad_settings::{
-    resolve_profile, validate_profile, validate_surface, AppSettingsSurface, SettingsProfile,
+    apply_hotload_proposal, resolve_profile, validate_profile, validate_surface,
+    AppSettingsSurface, HotloadProposal, SettingsLayerValues, SettingsProfile,
 };
 
 fn main() {
@@ -47,6 +48,36 @@ fn run() -> Result<(), String> {
             }
             Ok(())
         }
+        "hotload" => {
+            let surface = read_surface(required_path(&options, "--surface")?)?;
+            let profile = read_profile(required_path(&options, "--profile")?)?;
+            print_errors(validate_profile(&surface, &profile))?;
+            let proposal = read_hotload_proposal(required_path(&options, "--proposal")?)?;
+            let generated_at = format!("{:?}", SystemTime::now());
+            let result = match apply_hotload_proposal(
+                &surface,
+                [SettingsLayerValues {
+                    layer: profile.layer,
+                    source_id: profile.profile_id,
+                    values: profile.values,
+                }],
+                &proposal,
+                proposal.requested_revision + 1,
+                generated_at,
+            ) {
+                Ok(result) => result,
+                Err(errors) => return Err(format_errors(errors)),
+            };
+            let text = serde_json::to_string_pretty(&result)
+                .map_err(|error| format!("failed to encode hotload result: {error}"))?;
+            if let Some(out) = options.out {
+                fs::write(out, text)
+                    .map_err(|error| format!("failed to write hotload result: {error}"))?;
+            } else {
+                println!("{text}");
+            }
+            Ok(())
+        }
         _ => Err(usage()),
     }
 }
@@ -55,6 +86,7 @@ fn run() -> Result<(), String> {
 struct Options {
     surface: Option<PathBuf>,
     profile: Option<PathBuf>,
+    proposal: Option<PathBuf>,
     out: Option<PathBuf>,
 }
 
@@ -69,6 +101,7 @@ fn parse_options(args: Vec<String>) -> Result<Options, String> {
         match flag.as_str() {
             "--surface" => options.surface = Some(PathBuf::from(value)),
             "--profile" => options.profile = Some(PathBuf::from(value)),
+            "--proposal" => options.proposal = Some(PathBuf::from(value)),
             "--out" => options.out = Some(PathBuf::from(value)),
             _ => return Err(format!("unknown option {flag}\n{}", usage())),
         }
@@ -87,6 +120,10 @@ fn required_path<'a>(options: &'a Options, flag: &str) -> Result<&'a PathBuf, St
             .profile
             .as_ref()
             .ok_or_else(|| "--profile is required".to_string()),
+        "--proposal" => options
+            .proposal
+            .as_ref()
+            .ok_or_else(|| "--proposal is required".to_string()),
         _ => Err(format!("unsupported required flag {flag}")),
     }
 }
@@ -103,6 +140,13 @@ fn read_profile(path: &PathBuf) -> Result<SettingsProfile, String> {
         .map_err(|error| format!("failed to read profile {}: {error}", path.display()))?;
     serde_json::from_str(&text)
         .map_err(|error| format!("failed to parse profile {}: {error}", path.display()))
+}
+
+fn read_hotload_proposal(path: &PathBuf) -> Result<HotloadProposal, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read proposal {}: {error}", path.display()))?;
+    serde_json::from_str(&text)
+        .map_err(|error| format!("failed to parse proposal {}: {error}", path.display()))
 }
 
 fn print_errors(
@@ -123,5 +167,5 @@ fn format_errors(errors: Vec<rusty_makepad_settings::ValidationError>) -> String
 }
 
 fn usage() -> String {
-    "usage: rusty-makepad-settings-cli validate-surface --surface <path> [--profile <path>]\n       rusty-makepad-settings-cli resolve --surface <path> --profile <path> [--out <path>]".to_string()
+    "usage: rusty-makepad-settings-cli validate-surface --surface <path> [--profile <path>]\n       rusty-makepad-settings-cli resolve --surface <path> --profile <path> [--out <path>]\n       rusty-makepad-settings-cli hotload --surface <path> --profile <path> --proposal <path> [--out <path>]".to_string()
 }
