@@ -35,6 +35,10 @@ workflow ownership.
   and hotload requests are entry points into the same resolver.
 - A profile is a value bundle over canonical setting ids, not a second place to
   define behavior.
+- When several entrypoints touch the same parameter, the canonical setting id
+  in `rusty.gui.makepad.app_settings_surface.v1` is the master. Require an
+  effective-settings report or rejection receipt before treating platform
+  readback, UI state, or hotload notification as accepted Makepad behavior.
 - ADB and platform property writers belong in `rusty-quest` or another platform
   adapter. This repo may describe exposure names but does not write them.
 - Quest/OpenXR Makepad apps belong in `rusty-quest-makepad`.
@@ -64,4 +68,3 @@ Run:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\check_all.ps1
 ```
-
